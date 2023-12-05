@@ -24,9 +24,9 @@ fn solve_first(almanac: Almanac) i64 {
 	for (almanac.seeds) |seed| {
 		var location = seed;
 		for (&almanac.maps) |map| {
-			for (map.ranges) |range| {
-				if (range.source <= location and location < range.source + range.len) {
-					location += range.dest - range.source;
+			for (map.transforms) |transform| {
+				if (transform.range.start <= location and location < transform.range.finish) {
+					location += transform.offset;
 					break;
 				}
 			}
@@ -37,75 +37,47 @@ fn solve_first(almanac: Almanac) i64 {
 }
 
 fn solve_second(allocator: std.mem.Allocator, almanac: Almanac) !i64 {
-	const Range = struct {
-		start: i64,
-		len: i64,
-
-		fn less_than_fn(_: void, a: @This(), b: @This()) bool {
-			return a.start < b.start;
-		}
-	};
-
-	var input_ranges = try std.ArrayListUnmanaged(Range).initCapacity(allocator, 64);
-	defer input_ranges.deinit(allocator);
-	var output_ranges = try std.ArrayListUnmanaged(Range).initCapacity(allocator, 64);
-	defer output_ranges.deinit(allocator);
+	var input_ranges = try std.ArrayList(Range).initCapacity(allocator, 32);
+	defer input_ranges.deinit();
+	var output_ranges = try std.ArrayList(Range).initCapacity(allocator, 32);
+	defer output_ranges.deinit();
 
 	var min_location: i64 = std.math.maxInt(i64);
 
 	const pair_count = @divExact(almanac.seeds.len, 2);
 	for (0..pair_count) |pair_index| {
 		input_ranges.clearRetainingCapacity();
-		const seed = try input_ranges.addOne(allocator);
-		seed.* = Range{
-			.start = almanac.seeds[pair_index * 2 + 0],
-			.len = almanac.seeds[pair_index * 2 + 1],
-		};
+		try input_ranges.append(Range.new_with_length(almanac.seeds[pair_index * 2 + 0], almanac.seeds[pair_index * 2 + 1]));
 
 		for (&almanac.maps) |map| {
 			var transform_index: usize = 0;
 			for (input_ranges.items) |input| {
 				var input_start_trim = input.start;
 
-				while (input_start_trim < input.start + input.len and transform_index < map.ranges.len) {
-					const transform = map.ranges[transform_index];
-					if (transform.source + transform.len <= input_start_trim) {
+				while (input_start_trim < input.finish and transform_index < map.transforms.len) {
+					const transform = map.transforms[transform_index];
+					if (transform.range.finish <= input_start_trim) {
 						transform_index += 1;
 						continue;
 					}
-					if (input.start + input.len <= transform.source) {
-						try output_ranges.append(allocator, .{
-							.start = input_start_trim,
-							.len = (input.start + input.len) - input_start_trim,
-						});
-						input_start_trim = input.start + input.len;
+					if (input.finish <= transform.range.start) {
+						try output_ranges.append(Range.new(input_start_trim, input.finish));
+						input_start_trim = input.finish;
 						break;
 					}
-
-					const start = @max(input_start_trim, transform.source);
-					const finish = @min(input.start + input.len, transform.source + transform.len);
-					if (start < finish) {
-						if (input_start_trim < start) {
-							try output_ranges.append(allocator, .{
-								.start = input_start_trim,
-								.len = start - input_start_trim,
-							});
-							input_start_trim = start;
+					if (Range.new(input_start_trim, input.finish).intersection(transform.range)) |intersection| {
+						if (input_start_trim < intersection.start) {
+							try output_ranges.append(Range.new(input_start_trim, intersection.start));
+							input_start_trim = intersection.start;
 						}
-						try output_ranges.append(allocator, .{
-							.start = start + (transform.dest - transform.source),
-							.len = finish - start,
-						});
-						input_start_trim = finish;
+						try output_ranges.append(intersection.add_offset(transform.offset));
+						input_start_trim = intersection.finish;
 					}
 				}
 
-				if (input_start_trim < input.start + input.len) {
-					try output_ranges.append(allocator, .{
-						.start = input_start_trim,
-						.len = (input.start + input.len) - input_start_trim,
-					});
-					input_start_trim = input.start + input.len;
+				if (input_start_trim < input.finish) {
+					try output_ranges.append(Range.new(input_start_trim, input.finish));
+					input_start_trim = input.finish;
 				}
 			}
 
@@ -123,25 +95,74 @@ fn solve_second(allocator: std.mem.Allocator, almanac: Almanac) !i64 {
 }
 
 const Almanac = struct {
-	pub const MAX_MAPS: usize = 7;
+	const MAX_MAPS: usize = 7;
 
 	seeds: []i64,
 	maps: [MAX_MAPS]Map,
 };
 
 const Map = struct {
-	ranges: []RangeMap,
+	transforms: []Transform,
 };
 
-const RangeMap = struct {
-	dest: i64,
-	source: i64,
-	len: i64,
+const Transform = struct {
+	range: Range,
+	offset: i64,
+
+	fn new(destination: i64, source: i64, length: i64) Transform {
+		return .{
+			.range = Range.new_with_length(source, length),
+			.offset = destination - source,
+		};
+	}
+
+	fn less_than_fn(_: void, a: Transform, b: Transform) bool {
+		return a.range.start < b.range.start;
+	}
+};
+
+const Range = struct {
+	start: i64,
+	finish: i64,
+
+	fn new(a: i64, b: i64) Range {
+		return .{
+			.start = a,
+			.finish = b,
+		};
+	}
+
+	fn new_with_length(start: i64, len: i64) Range {
+		return .{
+			.start = start,
+			.finish = start + len,
+		};
+	}
+
+	fn add_offset(self: Range, offset: i64) Range {
+		return .{
+			.start = self.start + offset,
+			.finish = self.finish + offset,
+		};
+	}
+
+	fn intersection(a: Range, b: Range) ?Range {
+		const start = @max(a.start, b.start);
+		const finish = @min(a.finish, b.finish);
+		if (start < finish) {
+			return Range.new(start, finish);
+		}
+		return null;
+	}
+
+	fn less_than_fn(_: void, a: Range, b: Range) bool {
+		return a.start < b.start;
+	}
 };
 
 fn almanac_free(self: Almanac, allocator: std.mem.Allocator) void {
 	for (&self.maps) |*map| {
-		allocator.free(map.ranges);
+		allocator.free(map.transforms);
 	}
 	allocator.free(self.seeds);
 }
@@ -153,14 +174,14 @@ fn almanac_parse(allocator: std.mem.Allocator, input: []const u8) !Almanac {
 		@panic("the input does not start with \"seeds:\"");
 	}
 
-	var seeds = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 32);
+	var seeds = try std.ArrayList(i64).initCapacity(allocator, 32);
 
 	while (it.next()) |slice| {
 		if (slice.len == 0) {
 			break;
 		}
 		const seed = try std.fmt.parseInt(i64, slice, 10);
-		try seeds.append(allocator, seed);
+		try seeds.append(seed);
 	}
 
 	var maps: [Almanac.MAX_MAPS]Map = undefined;
@@ -172,34 +193,29 @@ fn almanac_parse(allocator: std.mem.Allocator, input: []const u8) !Almanac {
 			@panic("missing map section (\"*** map:\")");
 		}
 
-		var ranges = try std.ArrayListUnmanaged(RangeMap).initCapacity(allocator, 64);
+		var transforms = try std.ArrayList(Transform).initCapacity(allocator, 64);
 		var range_index: usize = 0;
 		while (true) : (range_index += 1) {
 			const next_slice = it.next().?;
 			if (next_slice.len == 0) {
 				break;
 			}
-			var range = try ranges.addOne(allocator);
-			range.dest = try std.fmt.parseInt(i64, next_slice, 10);
-			range.source = try std.fmt.parseInt(i64, it.next().?, 10);
-			range.len = try std.fmt.parseInt(i64, it.next().?, 10);
+			const destination = try std.fmt.parseInt(i64, next_slice, 10);
+			const source = try std.fmt.parseInt(i64, it.next().?, 10);
+			const length = try std.fmt.parseInt(i64, it.next().?, 10);
+			try transforms.append(Transform.new(destination, source, length));
 		}
 
-		// NOTE: Sorting ranges here to simplify solution for the second part.
-		const LocalFn = struct {
-			fn less_than_fn(_: void, a: RangeMap, b: RangeMap) bool {
-				return a.source < b.source;
-			}
-		};
-		std.mem.sort(RangeMap, ranges.items, void{}, LocalFn.less_than_fn);
+		// NOTE: Sorting transforms here to simplify solution for the second part.
+		std.mem.sort(Transform, transforms.items, void{}, Transform.less_than_fn);
 
 		map.* = .{
-			.ranges = try ranges.toOwnedSlice(allocator),
+			.transforms = try transforms.toOwnedSlice(),
 		};
 	}
 
 	return .{
-		.seeds = try seeds.toOwnedSlice(allocator),
+		.seeds = try seeds.toOwnedSlice(),
 		.maps = maps,
 	};
 }
@@ -244,13 +260,13 @@ test almanac_parse {
 	const result = try almanac_parse(testing.allocator, input);
 	defer almanac_free(result, testing.allocator);
 	try testing.expectEqualSlices(i64, &[_]i64{ 79, 14, 55, 13 }, result.seeds);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest = 52, .source = 50, .len = 48 }, .{ .dest = 50, .source = 98, .len =  2 } }, result.maps[0].ranges);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest = 39, .source =  0, .len = 15 }, .{ .dest =  0, .source = 15, .len = 37 }, .{ .dest = 37, .source = 52, .len =  2 } }, result.maps[1].ranges);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest = 42, .source =  0, .len =  7 }, .{ .dest = 57, .source =  7, .len =  4 }, .{ .dest =  0, .source = 11, .len = 42 }, .{ .dest = 49, .source = 53, .len =  8 } }, result.maps[2].ranges);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest = 88, .source = 18, .len =  7 }, .{ .dest = 18, .source = 25, .len = 70 } }, result.maps[3].ranges);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest = 81, .source = 45, .len = 19 }, .{ .dest = 68, .source = 64, .len = 13 }, .{ .dest = 45, .source = 77, .len = 23 } }, result.maps[4].ranges);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest =  1, .source =  0, .len = 69 }, .{ .dest =  0, .source = 69, .len =  1 } }, result.maps[5].ranges);
-	try testing.expectEqualSlices(RangeMap, &[_]RangeMap{ .{ .dest = 60, .source = 56, .len = 37 }, .{ .dest = 56, .source = 93, .len =  4 } }, result.maps[6].ranges);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new(52, 50, 48), Transform.new(50, 98,  2) }, result.maps[0].transforms);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new(39,  0, 15), Transform.new( 0, 15, 37), Transform.new(37, 52,  2) }, result.maps[1].transforms);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new(42,  0,  7), Transform.new(57,  7,  4), Transform.new( 0, 11, 42), Transform.new(49, 53,  8) }, result.maps[2].transforms);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new(88, 18,  7), Transform.new(18, 25, 70) }, result.maps[3].transforms);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new(81, 45, 19), Transform.new(68, 64, 13), Transform.new(45, 77, 23) }, result.maps[4].transforms);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new( 1,  0, 69), Transform.new( 0, 69,  1) }, result.maps[5].transforms);
+	try testing.expectEqualSlices(Transform, &[_]Transform{ Transform.new(60, 56, 37), Transform.new(56, 93,  4) }, result.maps[6].transforms);
 }
 
 test "solve_first example input" {
